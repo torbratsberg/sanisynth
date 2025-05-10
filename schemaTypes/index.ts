@@ -41,6 +41,13 @@ const synthDocument = defineType({
             group: 'synth',
         }),
         defineField({
+            name: 'tempo',
+            title: 'Tempo (BPM)',
+            type: 'number',
+            initialValue: 120,
+            group: 'synth',
+        }),
+        defineField({
             name: 'waveform',
             title: 'Waveform',
             type: 'string',
@@ -56,11 +63,20 @@ const synthDocument = defineType({
             },
         }),
         defineField({
-            name: 'tempo',
-            title: 'Tempo (BPM)',
+            name: 'filterFrequency',
+            title: 'Filter Frequency',
             type: 'number',
-            initialValue: 120,
             group: 'synth',
+            initialValue: 25000,
+            validation: (rule) => rule.min(0).max(30000),
+        }),
+        defineField({
+            name: 'glide',
+            title: 'Glide',
+            type: 'number',
+            initialValue: 0,
+            group: 'synth',
+            validation: (rule) => rule.min(0).max(100),
         }),
         defineField({
             name: 'delay',
