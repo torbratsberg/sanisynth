@@ -2,17 +2,23 @@ import { useEffect, useMemo, useState } from 'react'
 import { useFormValue, useClient } from 'sanity';
 import { noteNameToFrequency } from '../actions/melodyPreviewer';
 
-export function SynthPlayer(props: any) {
-    const melodies = useFormValue(['melodies']);
-    const waveform = useFormValue(['waveform']);
-    const tempo = useFormValue(['tempo']);
-    // const baseFrequency = useFormValue(['baseFrequency']);
+export function SynthPlayer() {
     const client = useClient({ apiVersion: "2025-02-10" });
+
+    const patterns = useFormValue(['patterns']) as any[];
+    const waveform = useFormValue(['waveform']) as string;
+    const tempo = useFormValue(['tempo']) as number;
+    const waveshaper = useFormValue(['waveshaper']) as boolean;
+    const waveshaperCurve = useFormValue(['waveshaperCurve']) as number[];
+    const delay = useFormValue(['delay']) as number;
+
+    const [playing, setPlaying] = useState<boolean>(false);
     const [notes, setNotes] = useState<{ note: string, velocity: number, gate: number, active?: boolean }[]>([]);
-    const [running, setRunning] = useState<boolean>(false);
+    const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
+    const [currentNoteIndex, setCurrentNoteIndex] = useState<number>(-1);
 
     useMemo(async () => {
-        const data = await client.fetch(`*[_type == "melody" && _id in $melodyIds] {
+        const data = await client.fetch(`*[_type == "pattern" && _id in $patternIds] {
             _id,
             name,
             notes[] {
@@ -20,68 +26,120 @@ export function SynthPlayer(props: any) {
                 velocity,
                 gate,
             }
-        }`, { melodyIds: (melodies as any).map((melody: any) => melody._ref) });
+        }`, { patternIds: patterns.map(pattern => pattern._ref) });
 
-        const notes = data.map((melody_1: any) => {
-            return melody_1.notes;
+        const notes = patterns.map(pattern => {
+            const patternData = data.find((patternData: any) => patternData._id === pattern._ref);
+
+            if (patternData) {
+                return patternData.notes.map((note: any) => ({
+                    note: note.note,
+                    velocity: note.velocity,
+                    gate: note.gate,
+                }));
+            }
+            return [];
         }).flat();
 
-        console.log('Notes:', notes);
         setNotes(notes);
-    }, [melodies]);
+    }, [patterns, client]);
 
     useEffect(() => {
-        console.log(props);
-    }, [running]);
+        if (!audioContext) {
+            const newAudioContext = new window.AudioContext();
+            setAudioContext(newAudioContext);
+        }
+    }, []);
 
     const handlePlayMidi = async () => {
-        // Get MIDI access
-        const midiAccess = await navigator.requestMIDIAccess();
-        if (!midiAccess) {
-            console.error('No MIDI access');
+        try {
+            const midiAccess = await navigator.requestMIDIAccess();
+            if (!midiAccess) {
+                console.error('No MIDI access');
+                return;
+            }
+            console.log('MIDI access:', midiAccess);
+        } catch (error) {
+            console.error('MIDI access error:', error);
+        }
+    }
+
+    const handlePlay = async () => {
+        setPlaying(true);
+
+        if (!audioContext) {
+            setAudioContext(new (window.AudioContext || (window as any).webkitAudioContext)());
             return;
         }
-    }
 
-    const handlePlay = () => {
-        new Promise((resolve) => {
-            handlePlay1();
-            resolve(null);
+        await new Promise<void>(resolve => {
+            setTimeout(() => {
+                resolve();
+            }, 1);
         });
-    }
-    const handlePlay1 = async () => {
-        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
 
-        let rounds = 1;
-        while (rounds--) {
-            let i = 0;
-            for (const note of notes) {
+        const beatDuration = 60000 / (tempo as number || 120);
+        
+        const playSequence = async () => {
+            for (let i = 0; i < notes.length; i++) {
+                const note = notes[i];
 
-                console.log('Playing note:', note.note);
-                note.active = true;
+                setCurrentNoteIndex(i);
+
                 const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                
                 const frequency = noteNameToFrequency(note.note);
+                oscillator.frequency.value = frequency;
+                oscillator.type = (waveform as OscillatorType) || 'sine';
 
-                console.log(audioContext.currentTime + i * 1.0, audioContext.currentTime + i * 1.0 + 1);
-                oscillator.connect(audioContext.destination);
-                oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime + i * 1.0);
-                oscillator.type = (waveform as any) || 'sine';
-                oscillator.start(audioContext.currentTime + i * 1.0);
-                oscillator.stop(audioContext.currentTime + i * 1.0 + note.gate / 100);
+                const velocity = note.velocity / 100;
+                gainNode.gain.value = velocity;
 
-                await new Promise((resolve) => {
+                const noteDuration = (note.gate / 100) * beatDuration;
+
+                if (waveshaper) {
+                    const ws = audioContext.createWaveShaper();
+                    ws.curve = new Float32Array(waveshaperCurve);
+                    ws.connect(gainNode);
+                    gainNode.connect(ws);
+                    gainNode.gain.setValueAtTime(0.001, audioContext.currentTime);
+                    gainNode.gain.linearRampToValueAtTime(velocity, audioContext.currentTime + 0.01);
+                }
+
+                if (delay) {
+                    const delayNode = audioContext.createDelay();
+                    delayNode.delayTime.value = noteDuration * (delay / 100);
+                    gainNode.connect(delayNode);
+                    delayNode.connect(audioContext.destination);
+                }
+
+                oscillator.start();
+                
+                setTimeout(() => {
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.02);
+
                     setTimeout(() => {
-                    //     oscillator.stop();
-                        resolve(null);
-                    }, 1000);
-                });
-
-                oscillator.disconnect();
-                note.active = false;
-                i++;
+                        oscillator.stop();
+                        oscillator.disconnect();
+                        gainNode.disconnect();
+                    }, 500); // Was 20
+                }, noteDuration);
+                
+                await new Promise<void>(resolve => setTimeout(resolve, beatDuration));
             }
-        }
-    }
+
+            setCurrentNoteIndex(-1);
+        };
+
+        playSequence();
+    };
+
+    const handleStop = () => {
+        setPlaying(false);
+    };
 
     return (
         <div className="synth-player">
@@ -100,10 +158,14 @@ export function SynthPlayer(props: any) {
                     width: 30px;
                     font-size: 0.875rem;
                     text-align: center;
+                    position: relative;
+                    border: 1px solid #e2e8f0;
+                    border-radius: 4px;
                 }
 
                 .sequence-grid .note.active {
-                    position: relative;
+                    background-color: rgba(255, 200, 25, 0.2);
+                    border-color: rgba(255, 200, 25, 1);
                 }
 
                 .sequence-grid .note.active::after {
@@ -113,25 +175,62 @@ export function SynthPlayer(props: any) {
                     bottom: 0;
                     width: 100%;
                     height: 3px;
-                    border-radius: 10px;
                     background-color: rgba(255, 200, 25, 1);
+                    border-radius: 0 0 4px 4px;
+                }
+                
+                .control-buttons {
+                    display: flex;
+                    gap: 8px;
+                    margin-bottom: 12px;
+                }
+                
+                .control-buttons button {
+                    padding: 6px 12px;
                     border-radius: 4px;
+                    background-color: #e2e8f0;
+                    color: black;
+                    border: none;
+                    cursor: pointer;
+                }
+                
+                .control-buttons button:hover {
+                    background-color: #cbd5e0;
+                }
+                
+                .control-buttons button:active {
+                    background-color: #a0aec0;
+                }
+                
+                .synth-info {
+                    margin-top: 12px;
+                    font-size: 0.875rem;
+                    color: #718096;
                 }
             `}
             </style>
 
             <div className="sequence-grid">
-                { notes && notes.map((note, index: number) => (
-                    <div key={index.toString() + note} className={'note ' + (note.active ? 'active' : '')}>{note.note}</div>
-                )) }
+                {notes && notes.map((note, index: number) => (
+                    <div 
+                        key={index.toString() + note.note} 
+                        className={`note ${index === currentNoteIndex ? 'active' : ''}`}
+                    >
+                        {note.note}
+                    </div>
+                ))}
             </div>
 
-            <button type="button" onClick={handlePlayMidi}>Start MIDI</button>
-            <button type="button" onClick={handlePlay}>Start Synth</button>
-
-            <br/>
-
-            <button type="button" onClick={() => setRunning(false)}>Stop</button>
+            <div className="control-buttons">
+                <button type="button" onClick={handlePlayMidi}>MIDI</button>
+                <button type="button" onClick={handlePlay}>Play</button>
+                <button type="button" onClick={handleStop}>Stop</button>
+            </div>
+            
+            <div className="synth-info">
+                {tempo ? `Tempo: ${tempo} BPM` : 'No tempo set'}
+                {waveform ? ` · Waveform: ${waveform}` : ''}
+            </div>
         </div>
     )
 }
